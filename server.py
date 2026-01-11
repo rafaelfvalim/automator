@@ -1,9 +1,12 @@
 import os
+import threading
 import pymysql
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
+_db_initialized = False
+_db_lock = threading.Lock()
 
 # Mesma ideia do ThingSpeak
 WRITE_KEY = os.environ.get("WRITE_KEY", "YOUR_WRITE_KEY")
@@ -51,10 +54,15 @@ def init_db():
         with con.cursor() as cur:
             cur.execute(ddl)
 
-@app.before_first_request
-def _startup():
+@app.before_request
+def _ensure_db_initialized():
     # Garante que a tabela exista mesmo rodando via gunicorn
-    init_db()
+    global _db_initialized
+    if not _db_initialized:
+        with _db_lock:
+            if not _db_initialized:
+                init_db()
+                _db_initialized = True
 
 @app.route("/update", methods=["GET", "POST"])
 def update():
