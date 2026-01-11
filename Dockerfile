@@ -13,4 +13,4 @@ COPY . .
 # EasyPanel geralmente faz proxy para a porta do container
 EXPOSE 5000
 
-CMD ["gunicorn", "-b", "0.0.0.0:5000", "app:app", "--workers", "2", "--threads", "4", "--timeout", "60"]
+CMD ["gunicorn", "-b", "0.0.0.0:5000", "server:app", "--workers", "2", "--threads", "4", "--timeout", "60"]
