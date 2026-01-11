@@ -18,6 +18,7 @@ DB_USER = os.environ.get("DB_USER", "mariadb")
 DB_PASS = os.environ.get("DB_PASS", "")
 DB_NAME = os.environ.get("DB_NAME", "telemetry")
 
+
 def get_conn():
     return pymysql.connect(
         host=DB_HOST,
@@ -29,6 +30,7 @@ def get_conn():
         autocommit=True,
         cursorclass=pymysql.cursors.DictCursor,
     )
+
 
 def init_db():
     ddl = """
@@ -54,6 +56,7 @@ def init_db():
         with con.cursor() as cur:
             cur.execute(ddl)
 
+
 @app.before_request
 def _ensure_db_initialized():
     # Garante que a tabela exista mesmo rodando via gunicorn
@@ -63,6 +66,47 @@ def _ensure_db_initialized():
             if not _db_initialized:
                 init_db()
                 _db_initialized = True
+
+
+def _parse_dt(s: str):
+    """
+    Aceita:
+      - 2026-01-11T18:21:33
+      - 2026-01-11T18:21:33.123456
+      - 2026-01-11 18:21:33
+      - 2026-01-11T18:21:33Z  (tratado como UTC)
+    Retorna datetime (naive) ou None.
+    """
+    if not s:
+        return None
+    s = s.strip()
+    if s.endswith("Z"):
+        s = s[:-1]
+
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            pass
+
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
+def _to_float(v):
+    try:
+        return float(v) if v is not None and v != "" else None
+    except (ValueError, TypeError):
+        return None
+
 
 @app.route("/update", methods=["GET", "POST"])
 def update():
@@ -102,15 +146,27 @@ def update():
 
     with get_conn() as con:
         with con.cursor() as cur:
-            cur.execute(sql, (
-                created_at, api_key, status,
-                fields[0], fields[1], fields[2], fields[3],
-                fields[4], fields[5], fields[6], fields[7],
-                raw_payload
-            ))
+            cur.execute(
+                sql,
+                (
+                    created_at,
+                    api_key,
+                    status,
+                    fields[0],
+                    fields[1],
+                    fields[2],
+                    fields[3],
+                    fields[4],
+                    fields[5],
+                    fields[6],
+                    fields[7],
+                    raw_payload,
+                ),
+            )
             entry_id = cur.lastrowid
 
     return (str(entry_id), 200)
+
 
 @app.route("/latest", methods=["GET"])
 def latest():
@@ -122,6 +178,128 @@ def latest():
     if not row:
         return jsonify({"ok": False, "message": "no data"}), 404
     return jsonify({"ok": True, "data": row}), 200
+
+
+@app.route("/chart", methods=["GET"])
+def chart():
+    """
+    Retorno pronto para gráfico (Chart.js/Plotly):
+
+      /chart?last_minutes=60&limit=2000
+      /chart?start=2026-01-11T18:00:00Z&end=2026-01-11T19:00:00Z&limit=2000
+
+    Mapeamento:
+      field1 -> PM1.0
+      field2 -> PM2.5
+      field3 -> PM10
+    """
+
+    # limite
+    limit_raw = request.args.get("limit", "2000")
+    try:
+        limit = int(limit_raw)
+    except ValueError:
+        limit = 2000
+    limit = max(1, min(limit, 2000))
+
+    # filtros
+    start_raw = request.args.get("start")
+    end_raw = request.args.get("end")
+    last_minutes_raw = request.args.get("last_minutes")
+
+    start_dt = _parse_dt(start_raw) if start_raw else None
+    end_dt = _parse_dt(end_raw) if end_raw else None
+
+    params = []
+    where = ""
+
+    # last_minutes tem precedência se informado
+    if last_minutes_raw:
+        try:
+            last_minutes = int(last_minutes_raw)
+        except ValueError:
+            return jsonify({"ok": False, "error": "last_minutes inválido"}), 400
+
+        # até 31 dias
+        last_minutes = max(1, min(last_minutes, 60 * 24 * 31))
+
+        # created_at é UTC naive; usamos UTC_TIMESTAMP para não depender do timezone do servidor
+        where = "WHERE created_at >= (UTC_TIMESTAMP(6) - INTERVAL %s MINUTE)"
+        params.append(last_minutes)
+    else:
+        clauses = []
+
+        if start_raw and not start_dt:
+            return jsonify({"ok": False, "error": "start inválido"}), 400
+        if end_raw and not end_dt:
+            return jsonify({"ok": False, "error": "end inválido"}), 400
+        if start_dt and end_dt and start_dt > end_dt:
+            return jsonify({"ok": False, "error": "start maior que end"}), 400
+
+        if start_dt:
+            clauses.append("created_at >= %s")
+            params.append(start_dt)
+        if end_dt:
+            clauses.append("created_at <= %s")
+            params.append(end_dt)
+
+        if clauses:
+            where = "WHERE " + " AND ".join(clauses)
+
+    sql = f"""
+        SELECT id, created_at, field1, field2, field3
+        FROM entries
+        {where}
+        ORDER BY id DESC
+        LIMIT %s
+    """
+    params.append(limit)
+
+    with get_conn() as con:
+        with con.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+
+    # ordem cronológica para plot
+    rows.reverse()
+
+    labels = []
+    pm1 = []
+    pm25 = []
+    pm10 = []
+
+    for r in rows:
+        ts = r.get("created_at")
+        if hasattr(ts, "isoformat"):
+            ts_str = ts.isoformat() + "Z"
+        else:
+            ts_str = str(ts) + "Z"
+
+        labels.append(ts_str)
+        pm1.append(_to_float(r.get("field1")))
+        pm25.append(_to_float(r.get("field2")))
+        pm10.append(_to_float(r.get("field3")))
+
+    return jsonify(
+        {
+            "ok": True,
+            "meta": {
+                "tz": "UTC",
+                "start": start_raw,
+                "end": end_raw,
+                "last_minutes": last_minutes_raw,
+                "limit": limit,
+                "points": len(labels),
+            },
+            "labels": labels,
+            "series": {
+                "pm1": pm1,
+                "pm25": pm25,
+                "pm10": pm10,
+            },
+        }
+    ), 200
+
 
 if __name__ == "__main__":
     # Em dev local
