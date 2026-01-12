@@ -6,7 +6,13 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+# Configuração explícita do CORS para permitir todas as origens, métodos e headers
+CORS(app, 
+     resources={r"/*": {
+         "origins": "*",
+         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+         "allow_headers": ["Content-Type", "Authorization"]
+     }})
 _db_initialized = False
 _db_lock = threading.Lock()
 
