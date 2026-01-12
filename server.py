@@ -116,8 +116,35 @@ def _to_float(v):
         return None
 
 
+def _validate_api_key():
+    """
+    Valida a api_key da requisição.
+    Aceita api_key via querystring, form ou JSON.
+    Retorna (True, api_key) se válida, (False, None) caso contrário.
+    """
+    data = {}
+    data.update(request.args.to_dict(flat=True))
+    if request.form:
+        data.update(request.form.to_dict(flat=True))
+    if request.is_json:
+        js = request.get_json(silent=True) or {}
+        if isinstance(js, dict):
+            data.update(js)
+    
+    api_key = (data.get("api_key") or data.get("apikey") or "").strip()
+    if not api_key or api_key != WRITE_KEY:
+        return False, None
+    return True, api_key
+
+
 @app.route("/update", methods=["GET", "POST"])
 def update():
+    # Valida api_key
+    is_valid, api_key = _validate_api_key()
+    if not is_valid:
+        # ThingSpeak retorna "0" quando falha
+        return ("0", 200)
+    
     # Aceita querystring, x-www-form-urlencoded e JSON
     data = {}
     data.update(request.args.to_dict(flat=True))
@@ -127,11 +154,6 @@ def update():
         js = request.get_json(silent=True) or {}
         if isinstance(js, dict):
             data.update(js)
-
-    api_key = (data.get("api_key") or data.get("apikey") or "").strip()
-    if not api_key or api_key != WRITE_KEY:
-        # ThingSpeak retorna "0" quando falha
-        return ("0", 200)
 
     status = data.get("status")
     fields = [data.get(f"field{i}") for i in range(1, 9)]
@@ -178,6 +200,11 @@ def update():
 
 @app.route("/latest", methods=["GET"])
 def latest():
+    # Valida api_key
+    is_valid, _ = _validate_api_key()
+    if not is_valid:
+        return jsonify({"ok": False, "error": "api_key inválida ou ausente"}), 401
+    
     with get_conn() as con:
         with con.cursor() as cur:
             cur.execute("SELECT * FROM entries ORDER BY id DESC LIMIT 1")
@@ -193,14 +220,18 @@ def chart():
     """
     Retorno pronto para gráfico (Chart.js/Plotly):
 
-      /chart?last_minutes=60&limit=2000
-      /chart?start=2026-01-11T18:00:00Z&end=2026-01-11T19:00:00Z&limit=2000
+      /chart?api_key=XXX&last_minutes=60&limit=2000
+      /chart?api_key=XXX&start=2026-01-11T18:00:00Z&end=2026-01-11T19:00:00Z&limit=2000
 
     Mapeamento:
       field1 -> PM1.0
       field2 -> PM2.5
       field3 -> PM10
     """
+    # Valida api_key
+    is_valid, _ = _validate_api_key()
+    if not is_valid:
+        return jsonify({"ok": False, "error": "api_key inválida ou ausente"}), 401
 
     # limite
     limit_raw = request.args.get("limit", "2000")
