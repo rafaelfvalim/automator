@@ -3,8 +3,10 @@ import threading
 import pymysql
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
 _db_initialized = False
 _db_lock = threading.Lock()
 
