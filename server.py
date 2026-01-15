@@ -300,8 +300,9 @@ def chart():
             rows = cur.fetchall()
 
     # ordem cronológica para plot
-    # Converte para lista se necessário (fetchall pode retornar tupla)
-    rows = list(rows)
+    # Converte para lista se necessário (fetchall pode retornar tupla em algumas versões)
+    if not isinstance(rows, list):
+        rows = list(rows)
     rows.reverse()
 
     labels = []
