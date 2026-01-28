@@ -42,23 +42,40 @@ def get_conn():
 
 def init_db():
     ddl = """
-    CREATE TABLE IF NOT EXISTS entries (
+    CREATE TABLE IF NOT EXISTS entries_sps30 (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       created_at DATETIME(6) NOT NULL,
-      api_key VARCHAR(64) NULL,
-      status VARCHAR(255) NULL,
-      field1 VARCHAR(255) NULL,
-      field2 VARCHAR(255) NULL,
-      field3 VARCHAR(255) NULL,
-      field4 VARCHAR(255) NULL,
-      field5 VARCHAR(255) NULL,
-      field6 VARCHAR(255) NULL,
-      field7 VARCHAR(255) NULL,
-      field8 VARCHAR(255) NULL,
-      raw_payload TEXT NULL,
+      api_key VARCHAR(64) DEFAULT NULL,
+      status VARCHAR(255) DEFAULT NULL,
 
-      INDEX idx_created_at (created_at)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      -- Mass concentration (µg/m³)
+      pm1_0 DECIMAL(10,2) DEFAULT NULL,
+      pm2_5 DECIMAL(10,2) DEFAULT NULL,
+      pm4_0 DECIMAL(10,2) DEFAULT NULL,
+      pm10  DECIMAL(10,2) DEFAULT NULL,
+
+      -- Number concentration (#/cm³)
+      nc0_5 DECIMAL(12,2) DEFAULT NULL,
+      nc1_0 DECIMAL(12,2) DEFAULT NULL,
+      nc2_5 DECIMAL(12,2) DEFAULT NULL,
+      nc4_0 DECIMAL(12,2) DEFAULT NULL,
+      nc10  DECIMAL(12,2) DEFAULT NULL,
+
+      -- Typical particle size (µm)
+      typical_particle_size DECIMAL(6,3) DEFAULT NULL,
+
+      -- Auditoria / debug (payload original recebido)
+      raw_payload TEXT DEFAULT NULL,
+
+      PRIMARY KEY (id),
+
+      -- Índices para consultas por tempo e alertas/relatórios
+      KEY idx_sps30_created_at (created_at),
+      KEY idx_sps30_api_key_created_at (api_key, created_at),
+      KEY idx_sps30_pm2_5_created_at (pm2_5, created_at)
+    ) ENGINE=InnoDB
+      DEFAULT CHARSET=utf8mb4
+      COLLATE=utf8mb4_uca1400_ai_ci;
     """
     with get_conn() as con:
         with con.cursor() as cur:
@@ -156,7 +173,23 @@ def update():
             data.update(js)
 
     status = data.get("status")
-    fields = [data.get(f"field{i}") for i in range(1, 9)]
+
+    # Aceita campos novos do SPS30 ou campos antigos (field1-8) para compatibilidade
+    # Mass concentration (µg/m³)
+    pm1_0 = data.get("pm1_0") or data.get("field1")
+    pm2_5 = data.get("pm2_5") or data.get("field2")
+    pm4_0 = data.get("pm4_0") or data.get("field4")
+    pm10 = data.get("pm10") or data.get("field3")
+
+    # Number concentration (#/cm³)
+    nc0_5 = data.get("nc0_5") or data.get("field5")
+    nc1_0 = data.get("nc1_0") or data.get("field6")
+    nc2_5 = data.get("nc2_5") or data.get("field7")
+    nc4_0 = data.get("nc4_0") or data.get("field8")
+    nc10 = data.get("nc10")
+
+    # Typical particle size (µm)
+    typical_particle_size = data.get("typical_particle_size")
 
     created_at = datetime.now(timezone.utc).replace(tzinfo=None)  # grava como UTC "naive"
 
@@ -167,11 +200,13 @@ def update():
         raw_payload = None
 
     sql = """
-      INSERT INTO entries (
+      INSERT INTO entries_sps30 (
         created_at, api_key, status,
-        field1, field2, field3, field4, field5, field6, field7, field8,
+        pm1_0, pm2_5, pm4_0, pm10,
+        nc0_5, nc1_0, nc2_5, nc4_0, nc10,
+        typical_particle_size,
         raw_payload
-      ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+      ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """
 
     with get_conn() as con:
@@ -182,14 +217,16 @@ def update():
                     created_at,
                     api_key,
                     status,
-                    fields[0],
-                    fields[1],
-                    fields[2],
-                    fields[3],
-                    fields[4],
-                    fields[5],
-                    fields[6],
-                    fields[7],
+                    _to_float(pm1_0),
+                    _to_float(pm2_5),
+                    _to_float(pm4_0),
+                    _to_float(pm10),
+                    _to_float(nc0_5),
+                    _to_float(nc1_0),
+                    _to_float(nc2_5),
+                    _to_float(nc4_0),
+                    _to_float(nc10),
+                    _to_float(typical_particle_size),
                     raw_payload,
                 ),
             )
@@ -207,7 +244,7 @@ def latest():
     
     with get_conn() as con:
         with con.cursor() as cur:
-            cur.execute("SELECT * FROM entries ORDER BY id DESC LIMIT 1")
+            cur.execute("SELECT * FROM entries_sps30 ORDER BY id DESC LIMIT 1")
             row = cur.fetchone()
 
     if not row:
@@ -223,10 +260,10 @@ def chart():
       /chart?api_key=XXX&last_minutes=60&limit=2000
       /chart?api_key=XXX&start=2026-01-11T18:00:00Z&end=2026-01-11T19:00:00Z&limit=2000
 
-    Mapeamento:
-      field1 -> PM1.0
-      field2 -> PM2.5
-      field3 -> PM10
+    Retorna dados do sensor SPS30:
+      - Mass concentration (µg/m³): pm1_0, pm2_5, pm4_0, pm10
+      - Number concentration (#/cm³): nc0_5, nc1_0, nc2_5, nc4_0, nc10
+      - Typical particle size (µm): typical_particle_size
     """
     # Valida api_key
     is_valid, _ = _validate_api_key()
@@ -286,8 +323,9 @@ def chart():
             where = "WHERE " + " AND ".join(clauses)
 
     sql = f"""
-        SELECT id, created_at, field1, field2, field3
-        FROM entries
+        SELECT id, created_at, pm1_0, pm2_5, pm4_0, pm10,
+               nc0_5, nc1_0, nc2_5, nc4_0, nc10, typical_particle_size
+        FROM entries_sps30
         {where}
         ORDER BY id DESC
         LIMIT %s
@@ -306,9 +344,16 @@ def chart():
     rows.reverse()
 
     labels = []
-    pm1 = []
-    pm25 = []
-    pm10 = []
+    pm1_0 = []
+    pm2_5 = []
+    pm4_0 = []
+    pm10_list = []
+    nc0_5 = []
+    nc1_0 = []
+    nc2_5 = []
+    nc4_0 = []
+    nc10 = []
+    typical_particle_size_list = []
 
     for r in rows:
         ts = r.get("created_at")
@@ -318,9 +363,19 @@ def chart():
             ts_str = str(ts) + "Z"
 
         labels.append(ts_str)
-        pm1.append(_to_float(r.get("field1")))
-        pm25.append(_to_float(r.get("field2")))
-        pm10.append(_to_float(r.get("field3")))
+        # Mass concentration (µg/m³)
+        pm1_0.append(_to_float(r.get("pm1_0")))
+        pm2_5.append(_to_float(r.get("pm2_5")))
+        pm4_0.append(_to_float(r.get("pm4_0")))
+        pm10_list.append(_to_float(r.get("pm10")))
+        # Number concentration (#/cm³)
+        nc0_5.append(_to_float(r.get("nc0_5")))
+        nc1_0.append(_to_float(r.get("nc1_0")))
+        nc2_5.append(_to_float(r.get("nc2_5")))
+        nc4_0.append(_to_float(r.get("nc4_0")))
+        nc10.append(_to_float(r.get("nc10")))
+        # Typical particle size
+        typical_particle_size_list.append(_to_float(r.get("typical_particle_size")))
 
     return jsonify(
         {
@@ -335,9 +390,19 @@ def chart():
             },
             "labels": labels,
             "series": {
-                "pm1": pm1,
-                "pm25": pm25,
-                "pm10": pm10,
+                # Mass concentration (µg/m³)
+                "pm1_0": pm1_0,
+                "pm2_5": pm2_5,
+                "pm4_0": pm4_0,
+                "pm10": pm10_list,
+                # Number concentration (#/cm³)
+                "nc0_5": nc0_5,
+                "nc1_0": nc1_0,
+                "nc2_5": nc2_5,
+                "nc4_0": nc4_0,
+                "nc10": nc10,
+                # Typical particle size (µm)
+                "typical_particle_size": typical_particle_size_list,
             },
         }
     ), 200
